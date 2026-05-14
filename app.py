@@ -2,35 +2,14 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-
-load_dotenv()
-
-CVISUAL_MAILER_KEY = os.environ.get("CVISUAL_MAILER_KEY", "your_fallback_key_here")
-
-def send_brevo_email(to_email, to_name, subject, html_content):
-    url = "https://api.brevo.com/v3/smtp/email"
-    headers = {
-        "accept": "application/json",
-        "api-key": CVISUAL_MAILER_KEY,
-        "content-type": "application/json"
-    }
-    payload = {
-        "sender": {"name": "CVisual Agency", "email": "contact@cvisual.agency"},
-        "to": [{"email": to_email, "name": to_name}],
-        "subject": subject,
-        "htmlContent": html_content
-    }
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        return response.status_code == 201
-    except Exception as e:
-        print(f"Error sending email: {e}")
-        return False
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -39,21 +18,16 @@ CORS(app)
 basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'cvisual.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'cvisual-secret-2025' # Change this in production
+app.config['JWT_SECRET_KEY'] = 'cvisual-secret-2025'
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
-@app.errorhandler(500)
-def handle_500(e):
-    return jsonify(error=str(e), message="Internal Server Error"), 500
+CVISUAL_MAILER_KEY = os.environ.get("CVISUAL_MAILER_KEY", "your_fallback_key_here")
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    return jsonify(error=str(e), type=str(type(e))), 500
+# --- Models ---
 
-# Models
 class Admin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -65,7 +39,7 @@ class Service(db.Model):
     description = db.Column(db.Text, nullable=False)
     icon = db.Column(db.String(50))
     image = db.Column(db.String(255))
-    features = db.Column(db.Text) # Comma separated list
+    features = db.Column(db.Text)
 
 class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -75,7 +49,7 @@ class Project(db.Model):
     challenge = db.Column(db.Text)
     solution = db.Column(db.Text)
     live_link = db.Column(db.String(255))
-    gallery = db.Column(db.Text) # JSON string or comma separated
+    gallery = db.Column(db.Text)
 
 class Testimonial(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -88,7 +62,7 @@ class News(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
-    type = db.Column(db.String(50), default='actualite') # actualite, recrutement
+    type = db.Column(db.String(50), default='actualite')
     date = db.Column(db.String(50), default=lambda: datetime.now().strftime("%d %b %Y"))
 
 class Client(db.Model):
@@ -98,8 +72,20 @@ class Client(db.Model):
 
 class Stat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(50), unique=True) # projects, satisfaction, years, etc
+    key = db.Column(db.String(50), unique=True)
     value = db.Column(db.String(50))
+
+class RecruitmentQuestion(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    question = db.Column(db.String(255), nullable=False)
+    type = db.Column(db.String(50), default='text') # text, select, checkbox
+    options = db.Column(db.Text) # Comma separated
+    required = db.Column(db.Boolean, default=True)
+
+class Newsletter(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    date = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Application(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -109,182 +95,157 @@ class Application(db.Model):
     whatsapp = db.Column(db.String(50))
     tiktok = db.Column(db.String(100))
     sales_level = db.Column(db.String(50))
+    cv_filename = db.Column(db.String(255))
     cv_link = db.Column(db.String(255))
     motivation = db.Column(db.Text)
-    status = db.Column(db.String(20), default='pending') # pending, interview, accepted, rejected
+    answers = db.Column(db.Text)
+    status = db.Column(db.String(20), default='pending')
     date = db.Column(db.DateTime, default=datetime.utcnow)
 
-# Auth Routes
+# --- Helpers ---
+
+UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def send_brevo_email(to_email, to_name, subject, html_content):
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {"accept": "application/json", "api-key": CVISUAL_MAILER_KEY, "content-type": "application/json"}
+    payload = {
+        "sender": {"name": "CVisual Agency", "email": "contact@cvisual.agency"},
+        "to": [{"email": to_email, "name": to_name}],
+        "subject": subject,
+        "htmlContent": html_content
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        return response.status_code == 201
+    except: return False
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify(error=str(e)), 500
+
+# --- Routes ---
+
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     data = request.json
-    if not data:
-        return jsonify(msg="Missing JSON in request"), 400
-        
-    username = data.get('username')
-    password = data.get('password')
-    
-    admin = Admin.query.filter_by(username=username).first()
-    if admin and check_password_hash(admin.password, password):
-        token = create_access_token(identity=username)
-        return jsonify(access_token=token), 200
-    
+    if not data: return jsonify(msg="Missing JSON"), 400
+    admin = Admin.query.filter_by(username=data.get('username')).first()
+    if admin and check_password_hash(admin.password, data.get('password')):
+        return jsonify(access_token=create_access_token(identity=admin.username)), 200
     return jsonify(msg="Identifiants invalides"), 401
 
-# Public Data Routes
 @app.route('/api/services', methods=['GET'])
 def get_services():
-    services = Service.query.all()
-    return jsonify([{
-        'id': s.id, 'title': s.title, 'description': s.description, 
-        'icon': s.icon, 'image': s.image, 'features': s.features
-    } for s in services])
+    items = Service.query.all()
+    return jsonify([{'id':i.id, 'title':i.title, 'description':i.description, 'icon':i.icon} for i in items])
 
 @app.route('/api/portfolio', methods=['GET'])
 def get_portfolio():
-    projects = Project.query.all()
-    return jsonify([{
-        'id': p.id, 'title': p.title, 'category': p.category, 
-        'main_image': p.main_image, 'challenge': p.challenge,
-        'solution': p.solution, 'live_link': p.live_link,
-        'gallery': p.gallery.split(',') if p.gallery else []
-    } for p in projects])
+    items = Project.query.all()
+    return jsonify([{'id':i.id, 'title':i.title, 'category':i.category, 'main_image':i.main_image} for i in items])
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
-    stats = Stat.query.all()
-    return jsonify({s.key: s.value for s in stats})
-
-@app.route('/api/testimonials', methods=['GET'])
-def get_testimonials():
-    items = Testimonial.query.all()
-    return jsonify([{
-        'id': i.id, 'name': i.name, 'company': i.company, 
-        'content': i.content, 'avatar': i.avatar
-    } for i in items])
+    items = Stat.query.all()
+    return jsonify({i.key: i.value for i in items})
 
 @app.route('/api/news', methods=['GET'])
 def get_news():
-    news = News.query.order_by(News.id.desc()).all()
-    return jsonify([{
-        'id': n.id, 'title': n.title, 'content': n.content, 
-        'type': n.type, 'date': n.date
-    } for n in news])
+    items = News.query.order_by(News.id.desc()).all()
+    return jsonify([{'id':i.id, 'title':i.title, 'content':i.content, 'type':i.type, 'date':i.date} for i in items])
 
 @app.route('/api/clients', methods=['GET'])
 def get_clients():
-    clients = Client.query.all()
-    return jsonify([{'id': c.id, 'name': c.name, 'logo': c.logo} for c in clients])
+    items = Client.query.all()
+    return jsonify([{'id':i.id, 'name':i.name, 'logo':i.logo} for i in items])
+
+@app.route('/api/newsletter', methods=['POST'])
+def subscribe():
+    data = request.json
+    if not data.get('email'): return jsonify(error="Email requis"), 400
+    if not Newsletter.query.filter_by(email=data['email']).first():
+        db.session.add(Newsletter(email=data['email']))
+        db.session.commit()
+    return jsonify(success=True)
+
+@app.route('/api/recruitment/questions', methods=['GET'])
+def get_questions():
+    qs = RecruitmentQuestion.query.all()
+    return jsonify([{'id': q.id, 'question': q.question, 'type': q.type, 'options': q.options, 'required': q.required} for q in qs])
 
 @app.route('/api/apply', methods=['POST'])
 def apply():
     data = request.json
     new_app = Application(
-        news_id=data.get('newsId'),
-        full_name=data.get('fullName'),
-        email=data.get('email'),
-        whatsapp=data.get('whatsapp'),
-        tiktok=data.get('tiktok'),
-        sales_level=data.get('salesLevel'),
-        cv_link=data.get('cvLink'),
-        motivation=data.get('motivation')
+        full_name=data.get('fullName'), email=data.get('email'), whatsapp=data.get('whatsapp'),
+        tiktok=data.get('tiktok'), sales_level=data.get('salesLevel'), cv_link=data.get('cvLink'),
+        cv_filename=data.get('cvFilename'), motivation=data.get('motivation'), answers=data.get('answers')
     )
     db.session.add(new_app)
     db.session.commit()
-
-    # Send Notification Email
-    email_html = f"""
-    <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px; background-color: #0a0a0a; color: #ffffff; border-radius: 20px;">
-        <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #ffffff; font-size: 28px; font-weight: 800; margin: 0;">CVISUAL</h1>
-            <p style="color: #3b82f6; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin-top: 5px;">Creative Agency</p>
-        </div>
-        <div style="background: rgba(255,255,255,0.05); padding: 30px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.1);">
-            <h2 style="font-size: 20px; margin-bottom: 20px;">Candidature Reçue</h2>
-            <p>Bonjour <strong>{new_app.full_name}</strong>,</p>
-            <p>Merci d'avoir postulé chez <strong>CVisual Agency</strong>. Nous avons bien reçu vos informations.</p>
-            <p>Votre dossier est actuellement <strong>en attente de revue</strong> par notre équipe de recrutement.</p>
-            <div style="margin: 30px 0; padding: 20px; background: rgba(59,130,246,0.1); border-left: 4px solid #3b82f6; border-radius: 5px;">
-                <p style="margin: 0; font-size: 14px;"><strong>Statut :</strong> En attente de revue</p>
-            </div>
-            <p style="font-size: 14px; color: #94a3b8;">Nous vous contacterons prochainement si votre profil correspond à nos besoins actuels pour une interview.</p>
-        </div>
-        <div style="text-align: center; margin-top: 30px; font-size: 12px; color: #64748b;">
-            <p>© 2025 CVisual Agency. Tous droits réservés.</p>
-        </div>
-    </div>
-    """
-    send_brevo_email(new_app.email, new_app.full_name, "Confirmation de candidature - CVisual Agency", email_html)
-
     return jsonify(success=True), 201
 
-# Admin Protected Routes (CRUD)
-@app.route('/api/admin/stats', methods=['POST'])
+@app.route('/api/apply/upload', methods=['POST'])
+def upload_cv():
+    if 'file' not in request.files: return jsonify(error="No file"), 400
+    file = request.files['file']
+    if file and allowed_file(file.filename):
+        filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+        return jsonify(filename=filename, success=True)
+    return jsonify(error="Invalid file"), 400
+
+# --- Admin Protected ---
+
+@app.route('/api/admin/newsletter', methods=['GET'])
 @jwt_required()
-def update_stat():
+def admin_newsletter():
+    items = Newsletter.query.order_by(Newsletter.date.desc()).all()
+    return jsonify([{'id':i.id, 'email':i.email, 'date':i.date.strftime("%d %b %Y")} for i in items])
+
+@app.route('/api/admin/clients', methods=['POST'])
+@jwt_required()
+def admin_add_client():
     data = request.json
-    for key, value in data.items():
-        stat = Stat.query.filter_by(key=key).first()
-        if stat:
-            stat.value = str(value)
-        else:
-            db.session.add(Stat(key=key, value=str(value)))
+    db.session.add(Client(name=data['name'], logo=data['logo']))
     db.session.commit()
     return jsonify(success=True)
 
-@app.route('/api/admin/news', methods=['POST'])
+@app.route('/api/admin/clients/<int:id>', methods=['DELETE'])
 @jwt_required()
-def add_news():
-    data = request.json
-    item = News(
-        title=data.get('title'),
-        content=data.get('content'),
-        type=data.get('type', 'actualite')
-    )
-    db.session.add(item)
+def admin_del_client(id):
+    item = Client.query.get_or_404(id)
+    db.session.delete(item)
     db.session.commit()
     return jsonify(success=True)
 
-@app.route('/api/admin/news/<int:id>', methods=['DELETE', 'PUT'])
+@app.route('/api/admin/recruitment/questions', methods=['POST'])
 @jwt_required()
-def manage_news(id):
-    item = News.query.get_or_404(id)
-    if request.method == 'DELETE':
-        db.session.delete(item)
-        db.session.commit()
-        return jsonify(success=True)
-    elif request.method == 'PUT':
-        data = request.json
-        item.title = data.get('title')
-        item.content = data.get('content')
-        item.type = data.get('type')
-        db.session.commit()
-        return jsonify(success=True)
+def admin_add_question():
+    data = request.json
+    db.session.add(RecruitmentQuestion(question=data['question'], type=data.get('type','text'), options=data.get('options'), required=data.get('required',True)))
+    db.session.commit()
+    return jsonify(success=True)
 
 @app.route('/api/admin/applications', methods=['GET'])
 @jwt_required()
-def get_applications():
-    apps = Application.query.order_by(Application.date.desc()).all()
+def admin_apps():
+    items = Application.query.order_by(Application.date.desc()).all()
     return jsonify([{
-        'id': a.id, 'full_name': a.full_name, 'email': a.email,
-        'whatsapp': a.whatsapp, 'tiktok': a.tiktok, 'sales_level': a.sales_level,
-        'cv_link': a.cv_link, 'motivation': a.motivation, 'status': a.status,
-        'date': a.date.strftime("%d %b %Y"), 'news_id': a.news_id
-    } for a in apps])
+        'id':a.id, 'full_name':a.full_name, 'email':a.email, 'status':a.status, 'date':a.date.strftime("%d %b %Y"),
+        'cv_filename': a.cv_filename, 'cv_link': a.cv_link
+    } for a in items])
 
-@app.route('/api/admin/applications/<int:id>/status', methods=['PUT'])
-@jwt_required()
-def update_application_status(id):
-    app_item = Application.query.get_or_404(id)
-    data = request.json
-    app_item.status = data.get('status')
-    db.session.commit()
-    return jsonify(success=True)
-
-# Initialize Database
+# Init
 with app.app_context():
     db.create_all()
-    # Create default admin if not exists
     if not Admin.query.filter_by(username='admin').first():
         db.session.add(Admin(username='admin', password=generate_password_hash('admin123')))
         db.session.commit()
