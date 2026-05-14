@@ -128,6 +128,40 @@ class Application(db.Model):
     answers = db.Column(db.Text)
     status = db.Column(db.String(20), default='pending')
     date = db.Column(db.DateTime, default=datetime.utcnow)
+class Inquiry(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    first_name = db.Column(db.String(50))
+    last_name = db.Column(db.String(50))
+    email = db.Column(db.String(100))
+    service = db.Column(db.String(100))
+    message = db.Column(db.Text)
+    status = db.Column(db.String(20), default='pending')
+    date = db.Column(db.DateTime, default=datetime.utcnow)
+
+def send_brevo_email(to_email, subject, html_content):
+    api_key = os.getenv('CVISUAL_MAILER_KEY')
+    if not api_key:
+        print("BREVO_API_KEY non configurée")
+        return False
+    
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
+    data = {
+        "sender": {"name": "CVisual Agency", "email": "cvisualht1@gmail.com"},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html_content
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        return response.status_code == 201
+    except Exception as e:
+        print(f"Erreur Email: {e}")
+        return False
 
 # --- Routes ---
 
@@ -201,6 +235,11 @@ def get_questions():
 @app.route('/api/apply', methods=['POST'])
 def apply():
     data = request.json
+    # Check if recruitment is open
+    info = RecruitmentInfo.query.first()
+    if info and not info.is_active:
+        return jsonify(error="Le recrutement est fermé."), 403
+
     new_app = Application(
         full_name=data.get('fullName'),
         email=data.get('email'),
@@ -213,9 +252,60 @@ def apply():
     )
     db.session.add(new_app)
     db.session.commit()
+
+    # Send Email to Candidate
+    subject = "Candidature Reçue - CVisual Agency"
+    html = f"""
+    <div style="font-family: sans-serif; color: #333;">
+        <h2>Bonjour {new_app.full_name},</h2>
+        <p>Merci d'avoir postulé chez <b>CVisual Agency</b>. Nous avons bien reçu votre candidature.</p>
+        <p>Notre équipe va l'analyser avec attention et vous contactera si votre profil correspond à nos besoins.</p>
+        <br>
+        <p>Cordialement,<br>L'équipe CVisual</p>
+    </div>
+    """
+    send_brevo_email(new_app.email, subject, html)
+
+    # Send Notification to Admin
+    admin_html = f"<h3>Nouvelle Candidature</h3><p><b>Nom:</b> {new_app.full_name}</p><p><b>Email:</b> {new_app.email}</p>"
+    send_brevo_email("cvisualht1@gmail.com", "Nouvelle Candidature !", admin_html)
+
+    return jsonify(success=True)
+
+@app.route('/api/contact', methods=['POST'])
+def contact():
+    d = request.json
+    inquiry = Inquiry(
+        first_name=d.get('firstName'),
+        last_name=d.get('lastName'),
+        email=d.get('email'),
+        service=d.get('service'),
+        message=d.get('message')
+    )
+    db.session.add(inquiry)
+    db.session.commit()
+
+    # Send Notification to Admin
+    admin_html = f"<h3>Nouveau Devis/Contact</h3><p><b>Nom:</b> {inquiry.first_name} {inquiry.last_name}</p><p><b>Service:</b> {inquiry.service}</p><p><b>Message:</b> {inquiry.message}</p>"
+    send_brevo_email("cvisualht1@gmail.com", "Nouveau Message de Contact !", admin_html)
+
+    # Send Email to Client
+    subject = "Accusé de réception - CVisual Agency"
+    html = f"<h2>Bonjour {inquiry.first_name},</h2><p>Nous avons bien reçu votre demande de devis pour le service <b>{inquiry.service}</b>.</p><p>Un conseiller vous contactera sous peu.</p>"
+    send_brevo_email(inquiry.email, subject, html)
+
     return jsonify(success=True)
 
 # Admin CRUD
+@app.route('/api/apply/upload', methods=['POST'])
+def apply_upload():
+    file = request.files.get('file')
+    if file and allowed_file(file.filename):
+        name = secure_filename(f"cv_{datetime.now().timestamp()}_{file.filename}")
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], name))
+        return jsonify(success=True, filename=name)
+    return jsonify(error="Fichier non valide"), 400
+
 @app.route('/api/admin/upload', methods=['POST'])
 @jwt_required()
 def upload():
@@ -285,7 +375,58 @@ def admin_clients(id=None):
 @jwt_required()
 def admin_apps():
     items = Application.query.order_by(Application.date.desc()).all()
-    return jsonify([{'id':a.id, 'full_name':a.full_name, 'email':a.email, 'status':a.status, 'date':a.date.strftime("%d %b %Y"), 'cv_filename':a.cv_filename} for a in items])
+    return jsonify([{'id':a.id, 'full_name':a.full_name, 'email':a.email, 'status':a.status, 'date':a.date.strftime("%d %b %Y")} for a in items])
+
+@app.route('/api/admin/applications/<int:id>', methods=['GET'])
+@jwt_required()
+def admin_app_detail(id):
+    a = Application.query.get_or_404(id)
+    return jsonify({
+        'id': a.id,
+        'full_name': a.full_name,
+        'email': a.email,
+        'whatsapp': a.whatsapp,
+        'tiktok': a.tiktok,
+        'cv_filename': a.cv_filename,
+        'cv_link': a.cv_link,
+        'motivation': a.motivation,
+        'answers': a.answers,
+        'status': a.status,
+        'date': a.date.strftime("%d %b %Y %H:%M")
+    })
+
+@app.route('/api/admin/inquiries', methods=['GET'])
+@jwt_required()
+def admin_inquiries_list():
+    items = Inquiry.query.order_by(Inquiry.date.desc()).all()
+    return jsonify([{
+        'id': i.id,
+        'name': f"{i.first_name} {i.last_name}",
+        'email': i.email,
+        'service': i.service,
+        'status': i.status,
+        'date': i.date.strftime("%d %b %Y")
+    } for i in items])
+
+@app.route('/api/admin/inquiries/<int:id>', methods=['GET', 'DELETE', 'PUT'])
+@jwt_required()
+def admin_inquiry_detail(id):
+    i = Inquiry.query.get_or_404(id)
+    if request.method == 'DELETE':
+        db.session.delete(i); db.session.commit(); return jsonify(success=True)
+    if request.method == 'PUT':
+        i.status = request.json.get('status', i.status)
+        db.session.commit(); return jsonify(success=True)
+    return jsonify({
+        'id': i.id,
+        'firstName': i.first_name,
+        'lastName': i.last_name,
+        'email': i.email,
+        'service': i.service,
+        'message': i.message,
+        'status': i.status,
+        'date': i.date.strftime("%d %b %Y %H:%M")
+    })
 
 @app.route('/api/admin/applications/<int:id>/status', methods=['PUT'])
 @jwt_required()
@@ -374,15 +515,29 @@ def admin_recruitment_info():
             return jsonify(success=True)
         return jsonify({
             'job_title': info.job_title if info else '',
-            'job_details': info.job_details if info else ''
+            'job_details': info.job_details if info else '',
+            'is_active': info.is_active if info else True
         })
     except Exception as e:
         return jsonify(error=str(e)), 500
 
+@app.route('/api/admin/recruitment/toggle', methods=['POST'])
+@jwt_required()
+def admin_recruitment_toggle():
+    info = RecruitmentInfo.query.first()
+    if not info: info = RecruitmentInfo(job_title="Poste à pourvoir")
+    info.is_active = request.json.get('is_active', True)
+    db.session.add(info); db.session.commit()
+    return jsonify(success=True)
+
 @app.route('/api/recruitment/info', methods=['GET'])
 def get_recruitment_info():
     info = RecruitmentInfo.query.first()
-    return jsonify({'job_title': info.job_title, 'job_details': info.job_details} if info else {'job_title': '', 'job_details': ''})
+    return jsonify({
+        'job_title': info.job_title if info else '',
+        'job_details': info.job_details if info else '',
+        'is_active': info.is_active if info else True
+    })
 
 @app.route('/api/admin/manage', methods=['POST'])
 @jwt_required()
