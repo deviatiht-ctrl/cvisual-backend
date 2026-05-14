@@ -25,7 +25,7 @@ if database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'cvisual-secret-2025'
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'cvisual-secret-2025')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 
 UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
