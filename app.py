@@ -554,6 +554,24 @@ def admin_manage():
 # Init
 with app.app_context():
     db.create_all()
+    
+    # Migrate password column size if needed
+    try:
+        with db.engine.connect() as conn:
+            # Check and alter admin password column
+            conn.execute(db.text("ALTER TABLE admin ALTER COLUMN password TYPE VARCHAR(255)"))
+            conn.commit()
+    except Exception as e:
+        print(f"Admin password column migration: {e}")
+    
+    try:
+        with db.engine.connect() as conn:
+            # Check and alter user password column
+            conn.execute(db.text("ALTER TABLE \"user\" ALTER COLUMN password TYPE VARCHAR(255)"))
+            conn.commit()
+    except Exception as e:
+        print(f"User password column migration: {e}")
+    
     if not Admin.query.filter_by(username='admin').first():
         db.session.add(Admin(username='admin', password=generate_password_hash('admin123')))
         db.session.commit()
