@@ -2,7 +2,7 @@ import os
 import requests
 from flask import Flask, request, jsonify
 
-BREVO_API_KEY = "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"
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "your_fallback_key_here")
 
 def send_brevo_email(to_email, to_name, subject, html_content):
     url = "https://api.brevo.com/v3/smtp/email"
