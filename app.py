@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"]
+}})
 
 # Configuration
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -40,6 +44,35 @@ class Admin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(120), nullable=False)
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    full_name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    company_name = db.Column(db.String(100)) # Optional for business accounts
+    is_company = db.Column(db.Boolean, default=False)
+    date = db.Column(db.DateTime, default=datetime.utcnow)
+
+class RecruitmentInfo(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    job_title = db.Column(db.String(200), nullable=False)
+    job_details = db.Column(db.Text)
+    is_active = db.Column(db.Boolean, default=True)
+
+class Visitor(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    ip_address = db.Column(db.String(50))
+    user_agent = db.Column(db.String(255))
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    visitor_id = db.Column(db.String(100)) # Session based for non-logged in
+    sender = db.Column(db.String(50)) # 'visitor' or 'admin'
+    message = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    is_read = db.Column(db.Boolean, default=False)
 
 class Service(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -84,12 +117,11 @@ class RecruitmentQuestion(db.Model):
 
 class Application(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    news_id = db.Column(db.Integer)
+    user_id = db.Column(db.Integer) # Related to User if logged in
     full_name = db.Column(db.String(100))
     email = db.Column(db.String(100))
     whatsapp = db.Column(db.String(50))
     tiktok = db.Column(db.String(100))
-    sales_level = db.Column(db.String(50))
     cv_filename = db.Column(db.String(255))
     cv_link = db.Column(db.String(255))
     motivation = db.Column(db.Text)
@@ -98,6 +130,35 @@ class Application(db.Model):
     date = db.Column(db.DateTime, default=datetime.utcnow)
 
 # --- Routes ---
+
+@app.route('/api/track', methods=['POST'])
+def track_visitor():
+    v = Visitor(ip_address=request.remote_addr, user_agent=request.user_agent.string)
+    db.session.add(v); db.session.commit()
+    return jsonify(success=True)
+
+@app.route('/api/user/register', methods=['POST'])
+def user_register():
+    d = request.json
+    if User.query.filter_by(email=d['email']).first():
+        return jsonify(msg="Email déjà utilisé"), 400
+    u = User(
+        full_name=d['fullName'],
+        email=d['email'],
+        password=generate_password_hash(d['password']),
+        company_name=d.get('companyName'),
+        is_company=d.get('isCompany', False)
+    )
+    db.session.add(u); db.session.commit()
+    return jsonify(success=True)
+
+@app.route('/api/user/login', methods=['POST'])
+def user_login():
+    d = request.json
+    u = User.query.filter_by(email=d.get('email')).first()
+    if u and check_password_hash(u.password, d.get('password')):
+        return jsonify(access_token=create_access_token(identity=u.email), user={'name': u.full_name, 'email': u.email}), 200
+    return jsonify(msg="Invalide"), 401
 
 @app.route('/api/uploads/<filename>')
 def uploaded_file(filename):
@@ -140,7 +201,16 @@ def get_questions():
 @app.route('/api/apply', methods=['POST'])
 def apply():
     data = request.json
-    new_app = Application(full_name=data.get('fullName'), email=data.get('email'), whatsapp=data.get('whatsapp'), tiktok=data.get('tiktok'), cv_filename=data.get('cvFilename'), motivation=data.get('motivation'))
+    new_app = Application(
+        full_name=data.get('fullName'),
+        email=data.get('email'),
+        whatsapp=data.get('whatsapp'),
+        tiktok=data.get('tiktok'),
+        cv_filename=data.get('cvFilename'),
+        cv_link=data.get('cvLink'),
+        motivation=data.get('motivation'),
+        answers=data.get('answers')
+    )
     db.session.add(new_app)
     db.session.commit()
     return jsonify(success=True)
@@ -225,20 +295,103 @@ def admin_app_status(id):
     db.session.commit(); return jsonify(success=True)
 
 @app.route('/api/admin/recruitment/questions', methods=['POST'])
-@app.route('/api/admin/recruitment/questions/<int:id>', methods=['DELETE'])
+@app.route('/api/admin/recruitment/questions/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def admin_questions(id=None):
     if request.method == 'POST':
         d = request.json
-        db.session.add(RecruitmentQuestion(question=d['question'], type=d.get('type'), options=d.get('options'))); db.session.commit(); return jsonify(success=True)
+        q = RecruitmentQuestion(question=d['question'], type=d.get('type'), options=d.get('options'), required=d.get('required', False))
+        db.session.add(q); db.session.commit(); return jsonify(success=True)
+    
     item = RecruitmentQuestion.query.get_or_404(id)
-    db.session.delete(item); db.session.commit(); return jsonify(success=True)
+    if request.method == 'DELETE':
+        db.session.delete(item); db.session.commit(); return jsonify(success=True)
+    
+    d = request.json
+    item.question = d['question']
+    item.type = d.get('type')
+    item.options = d.get('options')
+    item.required = d.get('required', False)
+    db.session.commit(); return jsonify(success=True)
 
 @app.route('/api/admin/newsletter', methods=['GET'])
 @jwt_required()
 def admin_newsletter():
     items = Newsletter.query.all()
     return jsonify([{'id':i.id, 'email':i.email, 'date':i.date.strftime("%d %b %Y")} for i in items])
+
+# Chat
+@app.route('/api/chat/messages', methods=['GET', 'POST'])
+def chat_messages():
+    v_id = request.args.get('visitor_id') or request.remote_addr
+    if request.method == 'POST':
+        d = request.json
+        m = ChatMessage(visitor_id=v_id, sender=d['sender'], message=d['message'])
+        db.session.add(m); db.session.commit(); return jsonify(success=True)
+    msgs = ChatMessage.query.filter_by(visitor_id=v_id).order_by(ChatMessage.timestamp.asc()).all()
+    return jsonify([{'sender':m.sender, 'message':m.message, 'time':m.timestamp.strftime("%H:%M")} for m in msgs])
+
+@app.route('/api/admin/chat/conversations', methods=['GET'])
+@jwt_required()
+def admin_chat_convs():
+    # Group by visitor_id
+    convs = db.session.query(ChatMessage.visitor_id).distinct().all()
+    return jsonify([c[0] for c in convs])
+
+# Stats & Settings
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    # Public stats
+    return jsonify({
+        'projects': Project.query.count(),
+        'clients': Client.query.count(),
+        'experience': 5, # Fallback
+        'satisfaction': 99
+    })
+
+@app.route('/api/admin/stats', methods=['GET'])
+@jwt_required()
+def admin_stats():
+    return jsonify({
+        'visitors': Visitor.query.count(),
+        'applications': Application.query.count(),
+        'news': News.query.count(),
+        'newsletter': Newsletter.query.count()
+    })
+
+@app.route('/api/admin/recruitment/info', methods=['GET', 'POST'])
+@jwt_required()
+def admin_recruitment_info():
+    try:
+        info = RecruitmentInfo.query.first()
+        if request.method == 'POST':
+            d = request.json
+            if not info: info = RecruitmentInfo()
+            info.job_title = d.get('job_title', '')
+            info.job_details = d.get('job_details', '')
+            db.session.add(info)
+            db.session.commit()
+            return jsonify(success=True)
+        return jsonify({
+            'job_title': info.job_title if info else '',
+            'job_details': info.job_details if info else ''
+        })
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+@app.route('/api/recruitment/info', methods=['GET'])
+def get_recruitment_info():
+    info = RecruitmentInfo.query.first()
+    return jsonify({'job_title': info.job_title, 'job_details': info.job_details} if info else {'job_title': '', 'job_details': ''})
+
+@app.route('/api/admin/manage', methods=['POST'])
+@jwt_required()
+def admin_manage():
+    d = request.json
+    if Admin.query.filter_by(username=d['username']).first():
+        return jsonify(msg="Existe déjà"), 400
+    new_admin = Admin(username=d['username'], password=generate_password_hash(d['password']))
+    db.session.add(new_admin); db.session.commit(); return jsonify(success=True)
 
 # Init
 with app.app_context():
