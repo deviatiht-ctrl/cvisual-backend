@@ -1,14 +1,17 @@
 import os
 import requests
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 
-BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "your_fallback_key_here")
+load_dotenv()
+
+CVISUAL_MAILER_KEY = os.environ.get("CVISUAL_MAILER_KEY", "your_fallback_key_here")
 
 def send_brevo_email(to_email, to_name, subject, html_content):
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {
         "accept": "application/json",
-        "api-key": BREVO_API_KEY,
+        "api-key": CVISUAL_MAILER_KEY,
         "content-type": "application/json"
     }
     payload = {
