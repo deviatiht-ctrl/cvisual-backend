@@ -144,7 +144,7 @@ class Inquiry(db.Model):
 def send_brevo_email(to_email, subject, html_content):
     api_key = os.getenv('CVISUAL_MAILER_KEY')
     if not api_key:
-        print("BREVO_API_KEY non configurée")
+        print("BREVO_API_KEY non configurée - Email non envoyé")
         return False
     
     url = "https://api.brevo.com/v3/smtp/email"
@@ -161,6 +161,9 @@ def send_brevo_email(to_email, subject, html_content):
     }
     try:
         response = requests.post(url, headers=headers, json=data)
+        print(f"Email response status: {response.status_code}")
+        if response.status_code != 201:
+            print(f"Email error response: {response.text}")
         return response.status_code == 201
     except Exception as e:
         print(f"Erreur Email: {e}")
