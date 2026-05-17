@@ -82,13 +82,13 @@ class Service(db.Model):
     title = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
     icon = db.Column(db.String(50))
-    image = db.Column(db.String(255))
+    image = db.Column(db.Text)
 
 class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100), nullable=False)
     category = db.Column(db.String(50), nullable=False)
-    main_image = db.Column(db.String(255))
+    main_image = db.Column(db.Text)
     challenge = db.Column(db.Text)
     solution = db.Column(db.Text)
     live_link = db.Column(db.String(255))
@@ -98,13 +98,13 @@ class News(db.Model):
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
     type = db.Column(db.String(50), default='actualite')
-    image = db.Column(db.String(255))
+    image = db.Column(db.Text)
     date = db.Column(db.String(50), default=lambda: datetime.now().strftime("%d %b %Y"))
 
 class Client(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    logo = db.Column(db.String(255))
+    logo = db.Column(db.Text)
 
 class Newsletter(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -440,9 +440,12 @@ def apply_upload():
 def upload():
     file = request.files.get('file')
     if file and allowed_file(file.filename):
-        name = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
-        file.save(os.path.join(app.config['UPLOAD_FOLDER'], name))
-        return jsonify(success=True, url=f"/api/uploads/{name}")
+        import base64
+        file_bytes = file.read()
+        mime_type = file.mimetype or "image/png"
+        base64_encoded = base64.b64encode(file_bytes).decode('utf-8')
+        base64_url = f"data:{mime_type};base64,{base64_encoded}"
+        return jsonify(success=True, url=base64_url)
     return jsonify(error="Error"), 400
 
 @app.route('/api/admin/services', methods=['POST'])
