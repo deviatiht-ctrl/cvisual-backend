@@ -796,6 +796,19 @@ def admin_email_broadcast():
 with app.app_context():
     db.create_all()
     
+    # If using PostgreSQL, alter VARCHAR(255) columns to TEXT to support Base64 images
+    if database_url.startswith('postgresql://'):
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE client ALTER COLUMN logo TYPE TEXT"))
+                conn.execute(db.text("ALTER TABLE project ALTER COLUMN main_image TYPE TEXT"))
+                conn.execute(db.text("ALTER TABLE service ALTER COLUMN image TYPE TEXT"))
+                conn.execute(db.text("ALTER TABLE news ALTER COLUMN image TYPE TEXT"))
+                conn.commit()
+            print("Successfully migrated columns to TEXT for Base64 storage.")
+        except Exception as e:
+            print(f"Base64 TEXT column migration warning: {e}")
+    
     # Seed default settings
     if not Setting.query.filter_by(key='logo_url').first():
         db.session.add(Setting(key='logo_url', value='https://cvisual-backend.onrender.com/api/uploads/logo.jpg'))
