@@ -83,6 +83,8 @@ class Service(db.Model):
     description = db.Column(db.Text)
     icon = db.Column(db.String(50))
     image = db.Column(db.Text)
+    price = db.Column(db.String(100))
+    delay = db.Column(db.String(100))
 
 class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -267,7 +269,7 @@ def login():
 @app.route('/api/services', methods=['GET'])
 def get_services():
     items = Service.query.all()
-    return jsonify([{'id':i.id, 'title':i.title, 'description':i.description, 'icon':i.icon, 'image':i.image} for i in items])
+    return jsonify([{'id':i.id, 'title':i.title, 'description':i.description, 'icon':i.icon, 'image':i.image, 'price':i.price, 'delay':i.delay} for i in items])
 
 @app.route('/api/portfolio', methods=['GET'])
 def get_portfolio():
@@ -454,13 +456,25 @@ def upload():
 def admin_services(id=None):
     if request.method == 'POST':
         d = request.json
-        s = Service(title=d['title'], description=d.get('description'), icon=d.get('icon'), image=d.get('image'))
+        s = Service(
+            title=d['title'],
+            description=d.get('description'),
+            icon=d.get('icon'),
+            image=d.get('image'),
+            price=d.get('price'),
+            delay=d.get('delay')
+        )
         db.session.add(s); db.session.commit(); return jsonify(success=True)
     item = Service.query.get_or_404(id)
     if request.method == 'DELETE':
         db.session.delete(item); db.session.commit(); return jsonify(success=True)
     d = request.json
-    item.title = d['title']; item.description = d.get('description'); item.icon = d.get('icon'); item.image = d.get('image')
+    item.title = d['title']
+    item.description = d.get('description')
+    item.icon = d.get('icon')
+    item.image = d.get('image')
+    item.price = d.get('price')
+    item.delay = d.get('delay')
     db.session.commit(); return jsonify(success=True)
 
 @app.route('/api/admin/portfolio', methods=['POST'])
@@ -804,8 +818,16 @@ with app.app_context():
                 conn.execute(db.text("ALTER TABLE project ALTER COLUMN main_image TYPE TEXT"))
                 conn.execute(db.text("ALTER TABLE service ALTER COLUMN image TYPE TEXT"))
                 conn.execute(db.text("ALTER TABLE news ALTER COLUMN image TYPE TEXT"))
+                try:
+                    conn.execute(db.text("ALTER TABLE service ADD COLUMN price VARCHAR(100)"))
+                except Exception:
+                    pass
+                try:
+                    conn.execute(db.text("ALTER TABLE service ADD COLUMN delay VARCHAR(100)"))
+                except Exception:
+                    pass
                 conn.commit()
-            print("Successfully migrated columns to TEXT for Base64 storage.")
+            print("Successfully migrated columns to TEXT for Base64 storage and added service columns.")
         except Exception as e:
             print(f"Base64 TEXT column migration warning: {e}")
     
