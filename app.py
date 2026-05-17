@@ -141,10 +141,50 @@ class Inquiry(db.Model):
     status = db.Column(db.String(20), default='pending')
     date = db.Column(db.DateTime, default=datetime.utcnow)
 
+class EmailTemplate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    subject = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    variables = db.Column(db.String(255))
+
+class Setting(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    value = db.Column(db.Text, nullable=False)
+
+def send_templated_email(to_email, template_key, context):
+    try:
+        template = EmailTemplate.query.filter_by(key=template_key).first()
+        if not template:
+            print(f"Modele d'email non trouve pour la cle : {template_key}")
+            return False
+        
+        logo_setting = Setting.query.filter_by(key='logo_url').first()
+        logo_url = logo_setting.value if logo_setting else "https://cvisual-backend.onrender.com/api/uploads/logo.jpg"
+        
+        full_context = {
+            'logo_url': logo_url,
+            **context
+        }
+        
+        subject = template.subject
+        body = template.body
+        
+        for k, v in full_context.items():
+            subject = subject.replace(f"{{{k}}}", str(v if v is not None else ''))
+            body = body.replace(f"{{{k}}}", str(v if v is not None else ''))
+            
+        return send_brevo_email(to_email, subject, body)
+    except Exception as e:
+        print(f"Erreur envoi email templated: {e}")
+        return False
+
 def send_brevo_email(to_email, subject, html_content):
-    api_key = os.getenv('CVISUAL_MAILER_KEY')
+    api_key = os.environ.get('CVISUAL_MAILER_KEY') or os.environ.get('BREVO_API_KEY')
     if not api_key:
-        print("BREVO_API_KEY non configurée - Email non envoyé")
+        print("BREVO_API_KEY / CVISUAL_MAILER_KEY non configurée - Email non envoyé")
         return False
     
     url = "https://api.brevo.com/v3/smtp/email"
@@ -190,6 +230,10 @@ def user_register():
         is_company=d.get('isCompany', False)
     )
     db.session.add(u); db.session.commit()
+    
+    # Send welcome email using templates
+    send_templated_email(u.email, 'user_registered', {'full_name': u.full_name, 'email': u.email})
+    
     return jsonify(success=True)
 
 @app.route('/api/user/login', methods=['POST'])
@@ -197,6 +241,13 @@ def user_login():
     d = request.json
     u = User.query.filter_by(email=d.get('email')).first()
     if u and check_password_hash(u.password, d.get('password')):
+        # Send security login email alert
+        send_templated_email(u.email, 'user_login', {
+            'full_name': u.full_name,
+            'email': u.email,
+            'date': datetime.now().strftime("%d %b %Y %H:%M"),
+            'ip_address': request.remote_addr
+        })
         return jsonify(access_token=create_access_token(identity=u.email), user={'name': u.full_name, 'email': u.email}), 200
     return jsonify(msg="Invalide"), 401
 
@@ -259,21 +310,51 @@ def apply():
     db.session.add(new_app)
     db.session.commit()
 
-    # Send Email to Candidate
-    subject = "Candidature Reçue - CVisual Agency"
-    html = f"""
-    <div style="font-family: sans-serif; color: #333;">
-        <h2>Bonjour {new_app.full_name},</h2>
-        <p>Merci d'avoir postulé chez <b>CVisual Agency</b>. Nous avons bien reçu votre candidature.</p>
-        <p>Notre équipe va l'analyser avec attention et vous contactera si votre profil correspond à nos besoins.</p>
-        <br>
-        <p>Cordialement,<br>L'équipe CVisual</p>
+    # Send Templated Email to Candidate
+    send_templated_email(new_app.email, 'candidature_received', {
+        'full_name': new_app.full_name,
+        'whatsapp': new_app.whatsapp or 'Non renseigne',
+        'tiktok': new_app.tiktok or 'Non renseigne'
+    })
+
+    # Send Premium Notification to Admin
+    admin_html = f"""
+    <div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #f8fafc; color: #1e293b;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h2 style="color: #0f172a; font-family: 'Outfit', sans-serif; font-size: 24px; font-weight: 800; margin: 0;">Nouvelle Candidature Reçue !</h2>
+            <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Un nouveau talent souhaite rejoindre CVisual Agency</p>
+        </div>
+        
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; padding: 30px; border-radius: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02);">
+            <h3 style="margin-top: 0; margin-bottom: 20px; font-size: 18px; color: #0f172a; border-bottom: 1px solid #f1f5f9; padding-bottom: 10px;">Détails du candidat</h3>
+            <table style="width: 100%; font-size: 15px; border-collapse: collapse; margin-bottom: 20px;">
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; width: 140px; font-weight: 500;">Nom complet :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">{new_app.full_name}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: 500;">Adresse email :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;"><a href="mailto:{new_app.email}" style="color: #3b82f6; text-decoration: none;">{new_app.email}</a></td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: 500;">WhatsApp :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">{new_app.whatsapp or 'Non renseigné'}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: 500;">TikTok :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">{new_app.tiktok or 'Non renseigné'}</td>
+                </tr>
+            </table>
+            
+            <h4 style="margin-bottom: 8px; color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Message de motivation</h4>
+            <div style="background-color: #f1f5f9; padding: 15px; border-radius: 12px; font-size: 14px; line-height: 1.5; color: #334155; font-style: italic; margin-bottom: 25px;">
+                "{new_app.motivation or 'Aucun message fourni'}"
+            </div>
+            
+            <a href="https://cvisual-admin.vercel.app/pages/admin/applications.html" style="display: block; text-align: center; background-color: #0f172a; color: #ffffff; padding: 16px; border-radius: 14px; font-weight: 700; text-decoration: none; font-size: 16px;">Voir la candidature sur le Dashboard</a>
+        </div>
     </div>
     """
-    send_brevo_email(new_app.email, subject, html)
-
-    # Send Notification to Admin
-    admin_html = f"<h3>Nouvelle Candidature</h3><p><b>Nom:</b> {new_app.full_name}</p><p><b>Email:</b> {new_app.email}</p>"
     send_brevo_email("cvisualht1@gmail.com", "Nouvelle Candidature !", admin_html)
 
     return jsonify(success=True)
@@ -291,14 +372,48 @@ def contact():
     db.session.add(inquiry)
     db.session.commit()
 
-    # Send Notification to Admin
-    admin_html = f"<h3>Nouveau Devis/Contact</h3><p><b>Nom:</b> {inquiry.first_name} {inquiry.last_name}</p><p><b>Service:</b> {inquiry.service}</p><p><b>Message:</b> {inquiry.message}</p>"
+    # Send Premium Notification to Admin
+    admin_html = f"""
+    <div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #f8fafc; color: #1e293b;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h2 style="color: #0f172a; font-family: 'Outfit', sans-serif; font-size: 24px; font-weight: 800; margin: 0;">Nouveau Devis / Contact !</h2>
+            <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Un nouveau client potentiel a soumis une demande</p>
+        </div>
+        
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; padding: 30px; border-radius: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02);">
+            <h3 style="margin-top: 0; margin-bottom: 20px; font-size: 18px; color: #0f172a; border-bottom: 1px solid #f1f5f9; padding-bottom: 10px;">Informations du contact</h3>
+            <table style="width: 100%; font-size: 15px; border-collapse: collapse; margin-bottom: 20px;">
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; width: 140px; font-weight: 500;">Nom complet :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">{inquiry.first_name} {inquiry.last_name}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: 500;">Adresse email :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #0f172a;"><a href="mailto:{inquiry.email}" style="color: #3b82f6; text-decoration: none;">{inquiry.email}</a></td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: 500;">Service demandé :</td>
+                    <td style="padding: 8px 0; font-weight: 700; color: #10b981;">{inquiry.service}</td>
+                </tr>
+            </table>
+            
+            <h4 style="margin-bottom: 8px; color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Message / Besoin du client</h4>
+            <div style="background-color: #f1f5f9; padding: 15px; border-radius: 12px; font-size: 14px; line-height: 1.5; color: #334155; font-style: italic; margin-bottom: 25px;">
+                "{inquiry.message}"
+            </div>
+            
+            <a href="https://cvisual-admin.vercel.app/pages/admin/inbox.html" style="display: block; text-align: center; background-color: #0f172a; color: #ffffff; padding: 16px; border-radius: 14px; font-weight: 700; text-decoration: none; font-size: 16px;">Consulter la boîte de réception</a>
+        </div>
+    </div>
+    """
     send_brevo_email("cvisualht1@gmail.com", "Nouveau Message de Contact !", admin_html)
 
-    # Send Email to Client
-    subject = "Accusé de réception - CVisual Agency"
-    html = f"<h2>Bonjour {inquiry.first_name},</h2><p>Nous avons bien reçu votre demande de devis pour le service <b>{inquiry.service}</b>.</p><p>Un conseiller vous contactera sous peu.</p>"
-    send_brevo_email(inquiry.email, subject, html)
+    # Send Templated Email to Client
+    send_templated_email(inquiry.email, 'devis_received', {
+        'first_name': inquiry.first_name,
+        'service': inquiry.service,
+        'message': inquiry.message
+    })
 
     return jsonify(success=True)
 
@@ -438,8 +553,19 @@ def admin_inquiry_detail(id):
 @jwt_required()
 def admin_app_status(id):
     item = Application.query.get_or_404(id)
-    item.status = request.json.get('status')
-    db.session.commit(); return jsonify(success=True)
+    status = request.json.get('status')
+    item.status = status
+    db.session.commit()
+
+    # Send status email notification using dynamic template engine
+    if status in ['accepted', 'interview', 'rejected'] and item.email:
+        template_key = f"candidature_{status}"
+        send_templated_email(item.email, template_key, {
+            'full_name': item.full_name,
+            'whatsapp': item.whatsapp or 'Non renseigne'
+        })
+
+    return jsonify(success=True)
 
 @app.route('/api/admin/recruitment/questions', methods=['POST'])
 @app.route('/api/admin/recruitment/questions/<int:id>', methods=['PUT', 'DELETE'])
@@ -554,8 +680,379 @@ def admin_manage():
     new_admin = Admin(username=d['username'], password=generate_password_hash(d['password']))
     db.session.add(new_admin); db.session.commit(); return jsonify(success=True)
 
+@app.route('/api/admin/emails/templates', methods=['GET'])
+@jwt_required()
+def admin_get_email_templates():
+    tpls = EmailTemplate.query.order_by(EmailTemplate.id.asc()).all()
+    return jsonify([{
+        'id': t.id,
+        'key': t.key,
+        'name': t.name,
+        'subject': t.subject,
+        'body': t.body,
+        'variables': t.variables
+    } for t in tpls])
+
+@app.route('/api/admin/emails/templates/<int:id>', methods=['GET', 'PUT'])
+@jwt_required()
+def admin_email_template_detail(id):
+    tpl = EmailTemplate.query.get_or_404(id)
+    if request.method == 'PUT':
+        d = request.json
+        tpl.subject = d.get('subject', tpl.subject)
+        tpl.body = d.get('body', tpl.body)
+        db.session.commit()
+        return jsonify(success=True)
+    return jsonify({
+        'id': tpl.id,
+        'key': tpl.key,
+        'name': tpl.name,
+        'subject': tpl.subject,
+        'body': tpl.body,
+        'variables': tpl.variables
+    })
+
+@app.route('/api/admin/emails/settings', methods=['GET', 'POST'])
+@jwt_required()
+def admin_email_settings():
+    logo_setting = Setting.query.filter_by(key='logo_url').first()
+    if not logo_setting:
+        logo_setting = Setting(key='logo_url', value='https://cvisual-backend.onrender.com/api/uploads/logo.jpg')
+        db.session.add(logo_setting)
+        db.session.commit()
+        
+    if request.method == 'POST':
+        d = request.json
+        logo_setting.value = d.get('logo_url', logo_setting.value)
+        db.session.commit()
+        return jsonify(success=True)
+        
+    return jsonify({
+        'logo_url': logo_setting.value
+    })
+
+@app.route('/api/admin/emails/broadcast', methods=['POST'])
+@jwt_required()
+def admin_email_broadcast():
+    d = request.json
+    target = d.get('target') # 'newsletter', 'applications', 'users'
+    subject = d.get('subject')
+    message = d.get('message')
+    
+    if not target or not subject or not message:
+        return jsonify(error="Champs obligatoires manquants"), 400
+        
+    emails = []
+    if target == 'newsletter':
+        items = Newsletter.query.all()
+        emails = [(i.email, 'Abonne') for i in items]
+    elif target == 'applications':
+        items = Application.query.all()
+        seen = set()
+        emails = []
+        for i in items:
+            if i.email and i.email not in seen:
+                seen.add(i.email)
+                emails.append((i.email, i.full_name or 'Candidat'))
+    elif target == 'users':
+        items = User.query.all()
+        emails = [(i.email, i.full_name or 'Utilisateur') for i in items]
+        
+    sent_count = 0
+    for to_email, full_name in emails:
+        success = send_templated_email(to_email, 'broadcast', {
+            'full_name': full_name,
+            'message': message
+        })
+        if success:
+            sent_count += 1
+            
+    return jsonify(success=True, sent_count=sent_count, total=len(emails))
+
 # Init
 with app.app_context():
+    db.create_all()
+    
+    # Seed default settings
+    if not Setting.query.filter_by(key='logo_url').first():
+        db.session.add(Setting(key='logo_url', value='https://cvisual-backend.onrender.com/api/uploads/logo.jpg'))
+        db.session.commit()
+
+    # Seed default templates
+    default_templates = [
+        {
+            'key': 'candidature_received',
+            'name': 'Candidature Recue (Candidat)',
+            'subject': 'Candidature Recue - CVisual Agency',
+            'variables': 'full_name, whatsapp, tiktok, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #3b82f6; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0; tracking-tight: -0.025em;">Candidature Recue !</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous avons bien recu votre candidature pour rejoindre l'equipe creative de <b>CVisual Agency</b>. Nous vous remercions pour l'interet et la confiance que vous nous accordez.</p>
+    
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <h4 style="margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; color: #64748b; letter-spacing: 0.05em;">Recapitulatif de votre dossier</h4>
+        <table style="width: 100%; font-size: 14px; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 6px 0; color: #64748b; width: 120px;">Nom complet :</td>
+                <td style="padding: 6px 0; font-weight: 600;">{full_name}</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px 0; color: #64748b;">WhatsApp :</td>
+                <td style="padding: 6px 0; font-weight: 600;">{whatsapp}</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px 0; color: #64748b;">TikTok :</td>
+                <td style="padding: 6px 0; font-weight: 600;">{tiktok}</td>
+            </tr>
+        </table>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Notre equipe de recrutement va etudier votre profil avec la plus grande attention. Si vos competences et votre creativite correspondent a nos besoins actuels, nous vous contacterons tres prochainement pour planifier un entretien.</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous vous souhaitons une excellente journee et beaucoup de succes dans votre parcours.</p>
+    
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">
+        Cordialement,<br>
+        <span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe CVisual Agency</span><br>
+        <a href="mailto:cvisualht1@gmail.com" style="color: #3b82f6; text-decoration: none;">cvisualht1@gmail.com</a>
+    </p>
+</div>"""
+        },
+        {
+            'key': 'candidature_accepted',
+            'name': 'Candidature Acceptee (Candidat)',
+            'subject': 'Felicitations ! Votre candidature est acceptee - CVisual Agency',
+            'variables': 'full_name, whatsapp, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #10b981; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0; tracking-tight: -0.025em;">Felicitations ! 🎉</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous avons le plaisir de vous annoncer que votre candidature pour rejoindre <b>CVisual Agency</b> a ete retenue ! Votre profil et votre creativite ont grandement retenu l'attention de notre jury.</p>
+    
+    <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <h4 style="margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; color: #166534; letter-spacing: 0.05em;">Prochaines etapes pour votre Onboarding</h4>
+        <p style="font-size: 14px; line-height: 1.6; color: #14532d; margin: 0;">
+            1. Un responsable va vous ajouter au groupe d'onboarding officiel sur <b>WhatsApp</b>.<br>
+            2. Vous recevrez les acces a vos outils de travail et votre contrat de collaboration.<br>
+            3. Une reunion d'accueil (Kick-off) sera planifiee dans la semaine.
+        </p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Si vous avez des questions urgentes, vous pouvez nous ecrire directement sur WhatsApp au numero associe a votre dossier ({whatsapp}).</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bienvenue dans l'aventure CVisual ! Ensemble, nous allons realiser de grandes choses.</p>
+    
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">
+        Cordialement,<br>
+        <span style="font-size: 16px; font-weight: 700; color: #0f172a;">La Direction - CVisual Agency</span><br>
+        <a href="mailto:cvisualht1@gmail.com" style="color: #3b82f6; text-decoration: none;">cvisualht1@gmail.com</a>
+    </p>
+</div>"""
+        },
+        {
+            'key': 'candidature_interview',
+            'name': 'Invitation a un Entretien (Candidat)',
+            'subject': 'Invitation a un entretien - CVisual Agency',
+            'variables': 'full_name, whatsapp, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #3b82f6; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0; tracking-tight: -0.025em;">Invitation Entretien 📅</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Dans le cadre de l'etude de votre candidature chez <b>CVisual Agency</b>, nous avons le plaisir de vous inviter a un entretien individuel afin de faire plus ample connaissance et d'echanger sur votre parcours et votre creativite.</p>
+    
+    <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <h4 style="margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; color: #1e3a8a; letter-spacing: 0.05em;">Modalites de l'entretien</h4>
+        <p style="font-size: 14px; line-height: 1.6; color: #1e3a8a; margin: 0;">
+            • <b>Format :</b> Visioconference (Google Meet / Zoom) ou Entretien telephonique<br>
+            • <b>Duree :</b> Environ 20 a 30 minutes<br>
+            • <b>Planification :</b> Un responsable du recrutement va vous contacter directement sur WhatsApp au <b>{whatsapp}</b> pour convenir d'un jour et d'une heure.
+        </p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Veuillez s'il vous plait preparer une rapide presentation de vos plus belles realisations (portfolio, designs, videos ou strategies).</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous sommes impatients de discuter avec vous !</p>
+    
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">
+        Cordialement,<br>
+        <span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe RH - CVisual Agency</span><br>
+        <a href="mailto:cvisualht1@gmail.com" style="color: #3b82f6; text-decoration: none;">cvisualht1@gmail.com</a>
+    </p>
+</div>"""
+        },
+        {
+            'key': 'candidature_rejected',
+            'name': 'Candidature Non Retenue (Candidat)',
+            'subject': 'Mise a jour concernant votre candidature - CVisual Agency',
+            'variables': 'full_name, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #64748b; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0; tracking-tight: -0.025em;">Candidature non retenue</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous vous remercions sincerement pour le temps que vous avez accorde a soumettre votre dossier de candidature pour rejoindre <b>CVisual Agency</b>.</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bien que votre parcours soit tout a fait honorable, nous avons le regret de vous informer que nous n'avons pas pu retenir votre dossier pour les postes actuellement ouverts. Nous avons recu un tres grand nombre de candidatures tres qualifiees et les choix ont ete extremement difficiles.</p>
+    
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <p style="font-size: 14px; line-height: 1.6; color: #475569; margin: 0;">
+            ⚠️ <b>Note de notre vivier de talents :</b><br>
+            Sauf avis contraire de votre part, nous conservons precieusement votre dossier dans notre base de donnees. Si de nouveaux besoins correspondant a votre profil se presentent a l'avenir, nous n'hesiterons pas a vous recontacter directement.
+        </p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous vous souhaitons beaucoup de reussite dans la poursuite de votre carriere professionnelle.</p>
+    
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">
+        Cordialement,<br>
+        <span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe RH - CVisual Agency</span><br>
+        <a href="mailto:cvisualht1@gmail.com" style="color: #3b82f6; text-decoration: none;">cvisualht1@gmail.com</a>
+    </p>
+</div>"""
+        },
+        {
+            'key': 'devis_received',
+            'name': 'Accuse de reception de Devis (Client)',
+            'subject': 'Demande de devis recue - CVisual Agency',
+            'variables': 'first_name, service, message, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #3b82f6; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0; tracking-tight: -0.025em;">Demande Recue !</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{first_name}</b>,</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous vous remercions d'avoir contacte <b>CVisual Agency</b> pour votre projet. Nous avons bien recu votre demande de devis pour le service <b>{service}</b>.</p>
+    
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <h4 style="margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; color: #64748b; letter-spacing: 0.05em;">Details de votre message</h4>
+        <p style="font-size: 14px; line-height: 1.5; color: #334155; font-style: italic; margin: 0;">
+            "{message}"
+        </p>
+    </div>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Un conseiller strategique de notre equipe etudie actuellement votre besoin et vous contactera sous 24 heures (jours ouvres) afin de vous proposer une offre sur mesure adaptee a vos objectifs.</p>
+    
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous sommes impatients de collaborer avec vous pour donner vie a vos projets les plus ambitieux !</p>
+    
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">
+        Cordialement,<br>
+        <span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe CVisual Agency</span><br>
+        <a href="mailto:cvisualht1@gmail.com" style="color: #3b82f6; text-decoration: none;">cvisualht1@gmail.com</a>
+    </p>
+</div>"""
+        },
+        {
+            'key': 'user_registered',
+            'name': 'Bienvenue sur CVisual (Utilisateur)',
+            'subject': 'Bienvenue chez CVisual Agency !',
+            'variables': 'full_name, email, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #3b82f6; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0;">Bienvenue !</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Nous sommes ravis de vous compter parmi nos membres enregistres ! Votre compte CVisual Agency a ete cree avec succes.</p>
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <table style="width: 100%; font-size: 14px;">
+            <tr><td style="color: #64748b; width: 100px;">Adresse email :</td><td style="font-weight: 600;">{email}</td></tr>
+            <tr><td style="color: #64748b;">Date d'inscription :</td><td style="font-weight: 600;">Aujourd'hui</td></tr>
+        </table>
+    </div>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Vous pouvez desormais vous connecter a votre espace client pour suivre vos projets, consulter vos factures et echanger directement avec notre equipe.</p>
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">Cordialement,<br><span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe CVisual Agency</span></p>
+</div>"""
+        },
+        {
+            'key': 'user_login',
+            'name': 'Alerte de Connexion (Utilisateur)',
+            'subject': 'Nouvelle connexion detectee - CVisual Agency',
+            'variables': 'full_name, email, date, ip_address, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #f59e0b; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0;">Securite du compte</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">Nouvelle connexion</p>
+    </div>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Une nouvelle connexion a ete detectee sur votre compte CVisual Agency.</p>
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 16px; margin-bottom: 30px;">
+        <table style="width: 100%; font-size: 14px;">
+            <tr><td style="color: #64748b; width: 120px;">Email :</td><td style="font-weight: 600;">{email}</td></tr>
+            <tr><td style="color: #64748b;">Date & Heure :</td><td style="font-weight: 600;">{date}</td></tr>
+            <tr><td style="color: #64748b;">Adresse IP :</td><td style="font-weight: 600;">{ip_address}</td></tr>
+        </table>
+    </div>
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5;">Si vous etes a l'origine de cette connexion, vous pouvez ignorer cet e-mail. Si vous ne reconnaissez pas cette activite, veuillez securiser votre compte et changer immediatement votre mot de passe.</p>
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">Cordialement,<br><span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe Securite CVisual</span></p>
+</div>"""
+        },
+        {
+            'key': 'broadcast',
+            'name': 'Imel General (Diffusion)',
+            'subject': 'Message Important - CVisual Agency',
+            'variables': 'full_name, message, logo_url',
+            'body': """<div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff; color: #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
+    <div style="text-align: center; margin-bottom: 30px;">
+        <img src="{logo_url}" alt="CVisual Logo" style="width: 70px; height: 70px; border-radius: 16px; margin-bottom: 15px; border: 1px solid #f1f5f9;">
+        <h2 style="color: #3b82f6; font-family: 'Outfit', sans-serif; font-size: 28px; font-weight: 800; margin: 0;">Annonce Importante</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;">CVisual Agency</p>
+    </div>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">Bonjour <b>{full_name}</b>,</p>
+    <div style="font-size: 16px; line-height: 1.7; color: #334155; margin-bottom: 30px; white-space: pre-wrap;">{message}</div>
+    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 30px 0;">
+    <p style="font-size: 14px; color: #64748b; line-height: 1.5; margin: 0; text-align: center;">Cordialement,<br><span style="font-size: 16px; font-weight: 700; color: #0f172a;">L'equipe CVisual Agency</span></p>
+</div>"""
+        }
+    ]
+    for dt in default_templates:
+        if not EmailTemplate.query.filter_by(key=dt['key']).first():
+            db.session.add(EmailTemplate(
+                key=dt['key'],
+                name=dt['name'],
+                subject=dt['subject'],
+                body=dt['body'],
+                variables=dt['variables']
+            ))
+    db.session.commit()
+
     db.create_all()
     
     # Migrate password column size if needed
