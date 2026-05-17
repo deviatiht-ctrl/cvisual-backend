@@ -272,7 +272,15 @@ def get_services():
 @app.route('/api/portfolio', methods=['GET'])
 def get_portfolio():
     items = Project.query.all()
-    return jsonify([{'id':i.id, 'title':i.title, 'category':i.category, 'main_image':i.main_image} for i in items])
+    return jsonify([{
+        'id': i.id,
+        'title': i.title,
+        'category': i.category,
+        'main_image': i.main_image,
+        'challenge': i.challenge,
+        'solution': i.solution,
+        'live_link': i.live_link
+    } for i in items])
 
 @app.route('/api/news', methods=['GET'])
 def get_news():
@@ -458,13 +466,25 @@ def admin_services(id=None):
 def admin_portfolio(id=None):
     if request.method == 'POST':
         d = request.json
-        p = Project(title=d['title'], category=d['category'], main_image=d.get('main_image'), challenge=d.get('challenge'))
+        p = Project(
+            title=d['title'],
+            category=d['category'],
+            main_image=d.get('main_image'),
+            challenge=d.get('challenge'),
+            solution=d.get('solution'),
+            live_link=d.get('live_link')
+        )
         db.session.add(p); db.session.commit(); return jsonify(success=True)
     item = Project.query.get_or_404(id)
     if request.method == 'DELETE':
         db.session.delete(item); db.session.commit(); return jsonify(success=True)
     d = request.json
-    item.title = d['title']; item.category = d['category']; item.main_image = d.get('main_image'); item.challenge = d.get('challenge')
+    item.title = d['title']
+    item.category = d['category']
+    item.main_image = d.get('main_image')
+    item.challenge = d.get('challenge')
+    item.solution = d.get('solution')
+    item.live_link = d.get('live_link')
     db.session.commit(); return jsonify(success=True)
 
 @app.route('/api/admin/news', methods=['POST'])
