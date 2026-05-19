@@ -156,12 +156,13 @@ class Setting(db.Model):
     key = db.Column(db.String(50), unique=True, nullable=False)
     value = db.Column(db.Text, nullable=False)
 
-def send_templated_email(to_email, template_key, context):
+def send_templated_email(to_email, template_key, context, subject_override=None):
     try:
         template = EmailTemplate.query.filter_by(key=template_key).first()
         if not template:
-            print(f"Modele d'email non trouve pour la cle : {template_key}")
-            return False
+            msg = f"Template introuvable: '{template_key}'"
+            print(msg)
+            return False, msg
         
         logo_setting = Setting.query.filter_by(key='logo_url').first()
         logo_url = logo_setting.value if logo_setting else "https://cvisual-backend.onrender.com/api/uploads/logo.jpg"
@@ -171,7 +172,7 @@ def send_templated_email(to_email, template_key, context):
             **context
         }
         
-        subject = template.subject
+        subject = subject_override or template.subject
         body = template.body
         
         for k, v in full_context.items():
@@ -181,13 +182,14 @@ def send_templated_email(to_email, template_key, context):
         return send_brevo_email(to_email, subject, body)
     except Exception as e:
         print(f"Erreur envoi email templated: {e}")
-        return False
+        return False, str(e)
 
 def send_brevo_email(to_email, subject, html_content):
     api_key = os.environ.get('CVISUAL_MAILER_KEY') or os.environ.get('BREVO_API_KEY')
     if not api_key:
-        print("BREVO_API_KEY / CVISUAL_MAILER_KEY non configurée - Email non envoyé")
-        return False
+        msg = "Cle API Brevo (CVISUAL_MAILER_KEY) non configuree dans les variables d'environnement"
+        print(f"[EMAIL ERROR] {msg}")
+        return False, msg
     
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {
@@ -203,13 +205,15 @@ def send_brevo_email(to_email, subject, html_content):
     }
     try:
         response = requests.post(url, headers=headers, json=data)
-        print(f"Email response status: {response.status_code}")
-        if response.status_code != 201:
-            print(f"Email error response: {response.text}")
-        return response.status_code == 201
+        print(f"[EMAIL] {to_email} -> HTTP {response.status_code}")
+        if response.status_code == 201:
+            return True, None
+        err = response.json().get('message', response.text[:300])
+        print(f"[EMAIL ERROR] {err}")
+        return False, f"Brevo HTTP {response.status_code}: {err}"
     except Exception as e:
-        print(f"Erreur Email: {e}")
-        return False
+        print(f"[EMAIL EXCEPTION] {e}")
+        return False, str(e)
 
 # --- Routes ---
 
@@ -768,6 +772,22 @@ def admin_email_settings():
         'logo_url': logo_setting.value
     })
 
+@app.route('/api/admin/emails/test', methods=['POST'])
+@jwt_required()
+def admin_email_test():
+    identity = get_jwt_identity()
+    admin = User.query.filter_by(id=identity).first()
+    if not admin:
+        return jsonify(error="Utilisateur introuvable"), 404
+    ok, err = send_brevo_email(
+        admin.email,
+        "Test Email - CVisual Admin",
+        "<div style='font-family:sans-serif;padding:30px'><h2>✅ Configuration email opérationnelle</h2><p>Si vous recevez ce message, la clé Brevo est correctement configurée.</p><p><b>CVisual Agency</b></p></div>"
+    )
+    if ok:
+        return jsonify(success=True, message=f"Email de test envoyé à {admin.email}")
+    return jsonify(success=False, error=err), 500
+
 @app.route('/api/admin/emails/broadcast', methods=['POST'])
 @jwt_required()
 def admin_email_broadcast():
@@ -796,15 +816,18 @@ def admin_email_broadcast():
         emails = [(i.email, i.full_name or 'Utilisateur') for i in items]
         
     sent_count = 0
+    errors = []
     for to_email, full_name in emails:
-        success = send_templated_email(to_email, 'broadcast', {
+        ok, err = send_templated_email(to_email, 'broadcast', {
             'full_name': full_name,
             'message': message
-        })
-        if success:
+        }, subject_override=subject)
+        if ok:
             sent_count += 1
+        else:
+            errors.append({'email': to_email[:4] + '***', 'reason': err})
             
-    return jsonify(success=True, sent_count=sent_count, total=len(emails))
+    return jsonify(success=True, sent_count=sent_count, total=len(emails), errors=errors)
 
 # Init
 with app.app_context():
